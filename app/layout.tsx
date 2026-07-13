@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "怒江声译｜新傈僳文翻译工作台",
-  description: "面向怒江地区的新傈僳文（拉丁字母）中文—傈僳语语音翻译与词条共建原型。",
+  title: "怒江傈僳语共建计划｜新傈僳文词条采集与审核",
+  description: "面向怒江地区的新傈僳文（拉丁字母）词条采集、母语者复核与社区共建计划。",
+  openGraph: {
+    title: "怒江傈僳语共建计划",
+    description: "先记录，再校对。由语言使用者共同建设新傈僳文词库。",
+    images: ["/og.png"],
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

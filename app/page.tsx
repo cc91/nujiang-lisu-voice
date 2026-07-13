@@ -1,377 +1,205 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
-type Language = "zh" | "lis";
-
-type Phrase = {
+type Candidate = {
   id: string;
+  text: string;
+  scene: string;
   source: string;
-  target: string;
-  sourceLanguage: Language;
-  note: string;
   createdAt: number;
 };
 
-type Recording = {
-  url: string;
-  duration: number;
-};
+const STARTER_PHRASES = [
+  { scene: "医院", text: "我需要去医院。" },
+  { scene: "医院", text: "请问最近的卫生院在哪里？" },
+  { scene: "出行", text: "请问去这里怎么走？" },
+  { scene: "出行", text: "这趟车到县城吗？" },
+  { scene: "办事", text: "请帮我填写这张表。" },
+  { scene: "办事", text: "我想咨询办理流程。" },
+  { scene: "日常", text: "请慢一点说，我没有听清。" },
+  { scene: "日常", text: "谢谢你的帮助。" },
+];
 
-type RecognitionLike = {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onresult: ((event: any) => void) | null;
-  onerror: ((event: any) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-};
+const SCENES = ["医院", "出行", "办事", "日常"];
 
-type RecognitionConstructor = new () => RecognitionLike;
-
-declare global {
-  interface Window {
-    SpeechRecognition?: RecognitionConstructor;
-    webkitSpeechRecognition?: RecognitionConstructor;
-  }
-}
-
-const LANGUAGE_LABEL: Record<Language, string> = {
-  zh: "中文",
-  lis: "新傈僳文",
-};
-
-const QUICK_START = ["我想去医院", "请帮我找路", "孩子今天上学", "这里有水吗？"];
-
-function phraseKey(text: string, language: Language) {
-  return `${language}:${text.trim().replace(/\s+/g, " ").toLowerCase()}`;
+function formatDate(timestamp: number) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(timestamp);
 }
 
 export default function Home() {
-  const [from, setFrom] = useState<Language>("zh");
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [text, setText] = useState("");
+  const [scene, setScene] = useState("医院");
   const [source, setSource] = useState("");
-  const [result, setResult] = useState("");
-  const [resultNote, setResultNote] = useState(
-    "输入一句话，系统会优先检索已录入、待母语者审核的本地词条。"
-  );
-  const [phrases, setPhrases] = useState<Phrase[]>([]);
-  const [isListening, setIsListening] = useState(false);
-  const [voiceHint, setVoiceHint] = useState("可以直接输入，也可以使用语音功能。 ");
-  const [recording, setRecording] = useState<Recording | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [draftTarget, setDraftTarget] = useState("");
-  const [draftNote, setDraftNote] = useState("");
   const [notice, setNotice] = useState("");
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const startedAtRef = useRef(0);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("nujiang-lisu-phrases");
-    if (!stored) return;
     try {
-      setPhrases(JSON.parse(stored));
+      const stored = window.localStorage.getItem("nujiang-lisu-candidate-phrases");
+      if (stored) setCandidates(JSON.parse(stored));
     } catch {
-      window.localStorage.removeItem("nujiang-lisu-phrases");
+      window.localStorage.removeItem("nujiang-lisu-candidate-phrases");
     }
   }, []);
 
   useEffect(() => {
-    if (phrases.length) {
-      window.localStorage.setItem("nujiang-lisu-phrases", JSON.stringify(phrases));
-    }
-  }, [phrases]);
+    window.localStorage.setItem("nujiang-lisu-candidate-phrases", JSON.stringify(candidates));
+  }, [candidates]);
 
-  const targetLanguage: Language = from === "zh" ? "lis" : "zh";
-  const matchingPhrase = useMemo(
-    () => phrases.find((item) => phraseKey(item.source, item.sourceLanguage) === phraseKey(source, from)),
-    [phrases, source, from]
+  const sceneCounts = useMemo(
+    () => SCENES.map((item) => ({ name: item, count: candidates.filter((candidate) => candidate.scene === item).length })),
+    [candidates]
   );
 
-  function translate() {
-    const text = source.trim();
-    if (!text) {
-      setResult("");
-      setResultNote("请先输入或说出需要翻译的内容。");
+  function saveCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanText = text.trim();
+    if (!cleanText) {
+      setNotice("请先填写一条中文候选句。");
       return;
     }
-    if (matchingPhrase) {
-      setResult(matchingPhrase.target);
-      setResultNote(
-        `来自本设备词库${matchingPhrase.note ? `：${matchingPhrase.note}` : "。请在发布前请母语者复核。"}`
-      );
-      return;
-    }
-    setResult("");
-    setResultNote("暂未找到已录入的对应译文。可在下方“共建词条”补充翻译，系统会保存到本设备。 ");
+    setCandidates((current) => [
+      {
+        id: `${Date.now()}`,
+        text: cleanText,
+        scene,
+        source: source.trim(),
+        createdAt: Date.now(),
+      },
+      ...current.filter((item) => item.text !== cleanText),
+    ]);
+    setText("");
+    setSource("");
+    setNotice("已加入本机待翻译清单。它尚未公开，也还不是已审核译文。");
   }
 
-  function swapLanguages() {
-    setFrom(targetLanguage);
-    setSource(result || "");
-    setResult(source || "");
-    setResultNote("已交换方向。请重新点击翻译以检索本地词库。 ");
-  }
-
-  function startChineseSpeech() {
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setVoiceHint("当前浏览器不支持语音转文字。请使用 Chrome 或直接输入。 ");
-      return;
-    }
-    const recognition = new Recognition();
-    recognition.lang = "zh-CN";
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.onresult = (event) => {
-      const transcript = Array.from(event.results as ArrayLike<any>)
-        .map((item: any) => item[0]?.transcript || "")
-        .join("");
-      setSource(transcript);
-    };
-    recognition.onerror = () => {
-      setVoiceHint("没有听清，请再试一次或改用文字输入。 ");
-      setIsListening(false);
-    };
-    recognition.onend = () => {
-      setIsListening(false);
-      setVoiceHint("中文语音已转为文字，可点击“翻译”。 ");
-    };
-    setIsListening(true);
-    setVoiceHint("正在聆听中文…说完后会自动停止。 ");
-    recognition.start();
-  }
-
-  async function startLisuRecording() {
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      setVoiceHint("当前浏览器无法录音。请使用手机 Chrome 或直接输入新傈僳文。 ");
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-      startedAtRef.current = Date.now();
-      recorder.ondataavailable = (event) => {
-        if (event.data.size) chunksRef.current.push(event.data);
-      };
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        const url = URL.createObjectURL(blob);
-        setRecording({ url, duration: Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000)) });
-        stream.getTracks().forEach((track) => track.stop());
-        setIsRecording(false);
-        setVoiceHint("已采集语音样本。当前版本会保留在本设备；转写模型将在有授权语料后接入。 ");
-      };
-      recorderRef.current = recorder;
-      recorder.start();
-      setIsRecording(true);
-      setVoiceHint("正在采集傈僳语语音…再次点击即可结束。 ");
-    } catch {
-      setVoiceHint("未获得麦克风权限。可在浏览器设置中允许后重试。 ");
-    }
-  }
-
-  function stopLisuRecording() {
-    recorderRef.current?.stop();
-  }
-
-  function speakResult() {
-    if (!result) return;
-    if (targetLanguage === "lis") {
-      setNotice("新傈僳文的真人自然朗读需要接入经授权的傈僳语 TTS 模型；当前网页不会把普通话语音冒充为傈僳语。 ");
-      return;
-    }
-    if (!window.speechSynthesis) {
-      setNotice("当前浏览器不支持朗读。 ");
-      return;
-    }
-    const utterance = new SpeechSynthesisUtterance(result);
-    utterance.lang = "zh-CN";
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function savePhrase() {
-    const sourceText = source.trim();
-    const targetText = draftTarget.trim();
-    if (!sourceText || !targetText) {
-      setNotice("请先填写原文和对应译文。 ");
-      return;
-    }
-    const newPhrase: Phrase = {
-      id: `${Date.now()}`,
-      source: sourceText,
-      target: targetText,
-      sourceLanguage: from,
-      note: draftNote.trim() || "待母语者审核",
-      createdAt: Date.now(),
-    };
-    setPhrases((current) => [newPhrase, ...current.filter((item) => phraseKey(item.source, item.sourceLanguage) !== phraseKey(sourceText, from))]);
-    setDraftTarget("");
-    setDraftNote("");
-    setResult(targetText);
-    setResultNote("已加入本设备词库，状态为待审核。 ");
-    setNotice("词条已保存。 ");
-  }
-
-  function useQuickStart(text: string) {
-    setFrom("zh");
-    setSource(text);
-    setResult("");
-    setResultNote("这是一条高频场景句。录入经审核的新傈僳文译文后即可反复使用。 ");
+  function useStarter(item: (typeof STARTER_PHRASES)[number]) {
+    setText(item.text);
+    setScene(item.scene);
+    setNotice("已放入采集表。可补充来源或备注后保存。");
+    document.getElementById("collect")?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   return (
     <main>
       <header className="site-header">
-        <a className="brand" href="#top" aria-label="怒江声译首页">
+        <a className="brand" href="#top" aria-label="怒江傈僳语共建计划首页">
           <span className="brand-mark">N</span>
-          <span>怒江声译 <em>Nujiang Lisu</em></span>
+          <span>怒江傈僳语 <em>community language project</em></span>
         </a>
         <nav aria-label="页面导航">
-          <a href="#translate">翻译</a>
-          <a href="#phrasebook">词条共建</a>
-          <a href="#about">数据说明</a>
+          <a href="#plan">项目方法</a>
+          <a href="#collect">词条清单</a>
+          <a href="#join">寻找贡献者</a>
         </nav>
-        <span className="version-pill">内测 · v0.1</span>
+        <span className="version-pill">共建筹备中</span>
       </header>
 
       <section className="hero" id="top">
         <div className="hero-copy">
           <p className="eyebrow">面向怒江 · 新傈僳文（拉丁字母）</p>
-          <h1>让每一句话，<br /><i>被认真听见。</i></h1>
-          <p className="hero-summary">一个从真实使用场景出发的中文—傈僳语语音翻译工作台。先收集、再校对、后训练；不把未经审核的内容说成正确译文。</p>
+          <h1>让傈僳语被认真记录，<br /><i>也被正确传下去。</i></h1>
+          <p className="hero-summary">
+            这是一个由语言使用者共同建设的词条计划。我们先收集常用中文、再由母语者录入与复核，最后才把经过确认的内容做成可用的翻译工具。
+          </p>
           <div className="hero-actions">
-            <a className="primary-action" href="#translate">开始翻译 <span>↓</span></a>
-            <a className="text-action" href="#phrasebook">参与共建词条</a>
+            <a className="primary-action" href="#collect">准备第一批词条 <span>↓</span></a>
+            <a className="text-action" href="#join">我认识语言贡献者</a>
           </div>
         </div>
-        <aside className="hero-card" aria-label="当前版本能力">
-          <div className="hero-card-top"><span>正在建设</span><b>01</b></div>
+        <aside className="hero-card" aria-label="本期目标">
+          <div className="hero-card-top"><span>本期目标</span><b>01</b></div>
           <div className="signal"><span /><span /><span /><span /><span /></div>
-          <h2>声音先留下，<br />标准慢慢长出来。</h2>
-          <p>中文语音转文字 · 傈僳语语音采集 · 本地词条检索</p>
+          <h2>先完成一个场景，<br />再扩大到更多日常。</h2>
+          <p>第一阶段：医院、出行、办事与日常沟通的 100 条中文候选句。</p>
+          <div className="goal-status"><span />等待母语者加入</div>
         </aside>
       </section>
 
-      <section className="translator-section" id="translate">
+      <section className="truth-banner" aria-label="当前阶段说明">
+        <strong>当前不是自动翻译器。</strong>
+        <span>网站正在建立可靠词库；没有经过母语者确认的傈僳语译文，就不显示“机器翻译结果”。</span>
+      </section>
+
+      <section className="plan-section" id="plan">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">翻译工作台</p>
-            <h2>先说出来，再一起校准。</h2>
+            <p className="eyebrow">建设方法</p>
+            <h2>不懂傈僳语，也能把项目做对。</h2>
           </div>
-          <p>首版只使用你本人或团队录入的本地词条；它不会编造傈僳语译文。</p>
+          <p>项目发起人负责场景、组织和经费；语言正确性由傈僳语使用者负责。每一条内容都保留来源、审核与授权记录。</p>
         </div>
-
-        <div className="translator-shell">
-          <section className="translation-panel source-panel">
-            <div className="panel-topline">
-              <button className="language-select" onClick={() => setFrom("zh")} aria-pressed={from === "zh"}>中文 <span>⌄</span></button>
-              <span className="panel-label">原文</span>
-            </div>
-            <textarea
-              value={source}
-              onChange={(event) => setSource(event.target.value)}
-              placeholder={from === "zh" ? "输入中文，或点击下方麦克风说话" : "输入新傈僳文（拉丁字母）"}
-              aria-label="原文输入"
-            />
-            <div className="panel-tools">
-              <span>{source.length}/300</span>
-              <button className="clear-button" onClick={() => setSource("")} disabled={!source}>清空</button>
-            </div>
-          </section>
-
-          <button className="swap-button" onClick={swapLanguages} aria-label="交换翻译方向">⇄</button>
-
-          <section className="translation-panel result-panel">
-            <div className="panel-topline">
-              <span className="language-result">{LANGUAGE_LABEL[targetLanguage]}</span>
-              <span className="panel-label">译文</span>
-            </div>
-            <div className={`translation-output ${result ? "has-result" : ""}`}>
-              {result || "译文将在这里显示"}
-            </div>
-            <div className="result-footer">
-              <span className="status-dot" /> <span>{result ? "本地词条命中" : "等待词条或审核译文"}</span>
-              <button className="speak-button" onClick={speakResult} disabled={!result}>朗读</button>
-            </div>
-          </section>
-
-          <div className="translate-controls">
-            <div className="voice-strip">
-              {from === "zh" ? (
-                <button className={`voice-button ${isListening ? "active" : ""}`} onClick={startChineseSpeech}>
-                  <span className="microphone">●</span>{isListening ? "正在聆听中文" : "说中文"}
-                </button>
-              ) : (
-                <button className={`voice-button ${isRecording ? "active" : ""}`} onClick={isRecording ? stopLisuRecording : startLisuRecording}>
-                  <span className="microphone">●</span>{isRecording ? "结束采集" : "采集傈僳语声音"}
-                </button>
-              )}
-              <span>{voiceHint}</span>
-              {recording && <audio controls src={recording.url} aria-label={`已采集的傈僳语录音，${recording.duration}秒`} />}
-            </div>
-            <button className="translate-button" onClick={translate}>翻译 <span>→</span></button>
-          </div>
-
-          <div className="translation-note"><span>◇</span>{resultNote}</div>
+        <div className="process-grid">
+          <article><b>01</b><h3>整理中文候选句</h3><p>从医院、出行、办事等真实需求出发，先列出需要表达什么。</p></article>
+          <article><b>02</b><h3>母语者录入写法与声音</h3><p>填写新傈僳文，标注地区或使用情境；录音必须先取得同意。</p></article>
+          <article><b>03</b><h3>另一位使用者复核</h3><p>不把单人答案直接发布。存在分歧时，保留说明与修订记录。</p></article>
+          <article><b>04</b><h3>发布可信词库</h3><p>先提供可检索的常用短句；数据积累后再评估翻译和语音模型。</p></article>
         </div>
       </section>
 
-      <section className="quick-section" aria-label="高频场景">
-        <p>试试这些高频场景</p>
-        <div>{QUICK_START.map((item) => <button key={item} onClick={() => useQuickStart(item)}>{item} <span>↗</span></button>)}</div>
-      </section>
-
-      <section className="build-section" id="phrasebook">
-        <div className="build-copy">
-          <p className="eyebrow">词条共建</p>
-          <h2>好翻译不是猜出来的，<br />是一起核对出来的。</h2>
-          <p>把本地常说的话、正确的新傈僳文写法和使用情境放进词库。当前条目仅保存在本设备，适合先由社区小范围试用和校对。</p>
-          <div className="principles">
-            <span><b>01</b> 标注方言与情境</span>
-            <span><b>02</b> 保留校对记录</span>
-            <span><b>03</b> 经同意再用于训练</span>
+      <section className="collection-section" id="collect">
+        <div className="collection-copy">
+          <p className="eyebrow">第一批词条</p>
+          <h2>先从 100 句中文开始。</h2>
+          <p>你可以从网络上的中文高频句清单中挑选生活化短句，也可以自己整理。请记录来源；它们只作为“待翻译任务”，不能被当作傈僳语译文或训练数据。</p>
+          <div className="scene-counts">
+            {sceneCounts.map((item) => <span key={item.name}><b>{item.count}</b>{item.name}</span>)}
           </div>
+          <div className="source-note"><b>选句原则</b> 短、具体、可在真实场景中说出口；避免小说、歌词、私人信息与带歧义的长段文字。</div>
         </div>
-        <form className="phrase-form" onSubmit={(event) => { event.preventDefault(); savePhrase(); }}>
-          <div className="form-kicker"><span>添加一个词条</span><em>本地保存</em></div>
-          <label>原文 <small>将使用上方输入内容</small><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如：我想去医院" /></label>
-          <label>对应译文 <small>{targetLanguage === "lis" ? "请填写新傈僳文（拉丁字母）" : "请填写中文"}</small><input value={draftTarget} onChange={(event) => setDraftTarget(event.target.value)} placeholder={targetLanguage === "lis" ? "填写经确认的新傈僳文" : "填写对应中文"} /></label>
-          <label>备注 <small>方言、场景或审核人</small><input value={draftNote} onChange={(event) => setDraftNote(event.target.value)} placeholder="例如：福贡县口语，待王老师复核" /></label>
-          <button className="save-button" type="submit">保存待审核词条 <span>+</span></button>
+
+        <form className="candidate-form" onSubmit={saveCandidate}>
+          <div className="form-kicker"><span>新增中文候选句</span><em>本机草稿</em></div>
+          <label>中文句子<textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="例如：请问最近的卫生院在哪里？" maxLength={120} /></label>
+          <div className="form-row">
+            <label>使用场景<select value={scene} onChange={(event) => setScene(event.target.value)}>{SCENES.map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label>来源或备注<input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如：生活场景整理" /></label>
+          </div>
+          <button className="save-button" type="submit">加入待翻译清单 <span>+</span></button>
           {notice && <p className="form-notice" role="status">{notice}</p>}
         </form>
       </section>
 
-      <section className="local-entries" aria-label="本地词条">
-        <div className="entries-heading"><h2>本设备词条</h2><span>{phrases.length} 条</span></div>
-        {phrases.length ? (
-          <div className="entries-grid">
-            {phrases.slice(0, 6).map((item) => (
-              <article className="entry-card" key={item.id}>
-                <span>{LANGUAGE_LABEL[item.sourceLanguage]} → {LANGUAGE_LABEL[item.sourceLanguage === "zh" ? "lis" : "zh"]}</span>
-                <strong>{item.source}</strong>
-                <p>{item.target}</p>
-                <small>待审核 · {item.note}</small>
-              </article>
-            ))}
-          </div>
-        ) : <p className="empty-entries">还没有本地词条。第一条经审核的常用语，会是词库的开始。</p>}
-      </section>
-
-      <section className="about-section" id="about">
-        <div><p className="eyebrow">数据说明</p><h2>把正确性放在“快”之前。</h2></div>
-        <div className="about-grid">
-          <article><b>文字</b><p>首发面向怒江地区的新傈僳文（拉丁字母），所有拼写需由本地使用者确认。</p></article>
-          <article><b>声音</b><p>中文可调用浏览器语音转写；傈僳语先进行语音采集，不假装已有可靠识别能力。</p></article>
-          <article><b>隐私</b><p>本原型的词条与录音预览留在当前设备。正式上传前应取得录音人同意并清楚标明用途。</p></article>
+      <section className="starter-section" aria-label="可直接使用的候选句">
+        <div className="starter-heading"><div><p className="eyebrow">快速起步</p><h2>可以先收集这些。</h2></div><span>点击任一句，放入上方清单</span></div>
+        <div className="starter-grid">
+          {STARTER_PHRASES.map((item) => <button key={item.text} onClick={() => useStarter(item)}><small>{item.scene}</small><strong>{item.text}</strong><span>加入清单 →</span></button>)}
         </div>
       </section>
 
-      <footer><span>怒江声译 · 新傈僳文内测原型</span><span>由社区语言使用者共同校对</span></footer>
+      <section className="local-entries" aria-label="本机候选句">
+        <div className="entries-heading"><h2>本机待翻译清单</h2><span>{candidates.length} 条</span></div>
+        {candidates.length ? (
+          <div className="entries-grid">
+            {candidates.slice(0, 6).map((item) => <article className="entry-card" key={item.id}><span>{item.scene} · {formatDate(item.createdAt)}</span><strong>{item.text}</strong><p>{item.source || "未记录来源"}</p><small>等待母语者录入与复核</small></article>)}
+          </div>
+        ) : <p className="empty-entries">还没有候选句。先从上方选一句，或把你找到的中文高频句加入清单。</p>}
+      </section>
+
+      <section className="join-section" id="join">
+        <div className="join-copy">
+          <p className="eyebrow">寻找语言贡献者</p>
+          <h2>每一位使用者，都是语言的老师。</h2>
+          <p>项目需要愿意提供语言知识的人。最理想的是至少两位傈僳语母语者，其中一位能读写新傈僳文；也欢迎教师、社区工作者与愿意协助录音的人加入。</p>
+        </div>
+        <div className="role-list">
+          <article><span>01</span><h3>录入者</h3><p>说傈僳语，愿意写出当地常用的新傈僳文表达。</p></article>
+          <article><span>02</span><h3>复核者</h3><p>独立检查拼写、含义与地区使用习惯，并标明不同说法。</p></article>
+          <article><span>03</span><h3>项目支持者</h3><p>帮助联系社区、安排有偿试点，或提供真实使用场景。</p></article>
+        </div>
+      </section>
+
+      <section className="about-section" id="about">
+        <div><p className="eyebrow">数据承诺</p><h2>先取得同意，<br />再谈技术与规模。</h2></div>
+        <div className="about-grid">
+          <article><b>准确</b><p>不把未知内容伪装成翻译结果；每条公开译文都应有明确审核状态。</p></article>
+          <article><b>尊重</b><p>录音、姓名与地区信息在收集前说明用途，允许贡献者拒绝或撤回。</p></article>
+          <article><b>共享</b><p>当前网页只保存本机草稿。正式共建前，会接入带审核记录的共享词库。</p></article>
+        </div>
+      </section>
+
+      <footer><span>怒江傈僳语共建计划 · 筹备版</span><span>先记录，再校对，再发布。</span></footer>
     </main>
   );
 }
